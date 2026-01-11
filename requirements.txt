@@ -1,0 +1,6 @@
+streamlit
+pandas
+yfinance
+openpyxl
+python-dateutil
+line-bot-sdk
