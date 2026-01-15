@@ -8,14 +8,14 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 戰情室 (精準推播版)", layout="wide")
+st.set_page_config(page_title="ELN 戰情室 (精準推播修正版)", layout="wide")
 
 # ==========================================
 # 🔐 雲端機密讀取
 # ==========================================
 try:
     LINE_ACCESS_TOKEN = st.secrets["LINE_ACCESS_TOKEN"]
-    MY_LINE_USER_ID = st.secrets["MY_LINE_USER_ID"] # 這是管理員(您)的ID
+    MY_LINE_USER_ID = st.secrets["MY_LINE_USER_ID"]
 except Exception:
     st.error("⚠️ 尚未設定 Secrets！請至 Streamlit Cloud 後台設定 LINE Token 與 UserID。")
     LINE_ACCESS_TOKEN = ""
@@ -38,27 +38,26 @@ with st.sidebar:
         st.error("❌ LINE 設定未完成")
 
     st.markdown("---")
-    # 鎖定真實日期
     real_today = datetime.now()
     st.info(f"📅 今天日期：{real_today.strftime('%Y-%m-%d')}")
     st.caption("鎖定真實日期")
 
     st.markdown("---")
     auto_send = st.checkbox("開啟「上傳即發送」功能", value=True)
-    st.warning("⚠️ 注意：免費版 LINE 帳號每月額度約 200 則。開啟個別發送會消耗較多額度。")
 
 # --- 函數區 ---
 def send_line_push(target_user_id, message_text):
-    """發送 LINE 訊息給指定的人 (target_user_id)"""
     if not LINE_ACCESS_TOKEN or not target_user_id:
         return False
     try:
-        # 簡單過濾一下 ID 格式，必須是 U 開頭
-        if not str(target_user_id).startswith("U"):
+        # 強制轉字串並去除空白
+        uid = str(target_user_id).strip()
+        # 簡單過濾：必須是 U 開頭且長度夠長
+        if not uid.startswith("U") or len(uid) < 10:
             return False
             
         line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
-        line_bot_api.push_message(str(target_user_id).strip(), TextSendMessage(text=message_text))
+        line_bot_api.push_message(uid, TextSendMessage(text=message_text))
         return True
     except Exception as e:
         print(f"發送失敗 ({target_user_id}): {e}")
@@ -76,6 +75,13 @@ def clean_percentage(val):
         s = str(val).replace('%', '').replace(',', '').strip()
         return float(s)
     except: return None
+
+# 🌟 新增：姓名清洗器 (消滅 nan)
+def clean_name_str(val):
+    if pd.isna(val): return "貴賓"
+    s = str(val).strip()
+    if s.lower() == 'nan' or s == "": return "貴賓"
+    return s
 
 def find_col_index(columns, include_keywords, exclude_keywords=None):
     for idx, col_name in enumerate(columns):
@@ -105,11 +111,14 @@ if uploaded_file is not None:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file)
 
+        # 簡單的資料清理：如果有空行，刪除之
+        df = df.dropna(how='all')
+
         if df.iloc[0].astype(str).str.contains("進場價").any():
             df = df.iloc[1:].reset_index(drop=True)
         cols = df.columns.tolist()
         
-        # 2. 定位欄位
+        # 2. 定位欄位 (這裡加強了 LIND_ID 的辨識)
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id"]) or (0, "")
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
         ko_idx, _ = find_col_index(cols, ["ko", "提前"], exclude_keywords=["strike", "執行", "ki", "type"])
@@ -124,20 +133,30 @@ if uploaded_file is not None:
         maturity_date_idx, _ = find_col_index(cols, ["到期", "maturity"])
         name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
         
-        # 關鍵：尋找 Line_ID 欄位
-        line_id_idx, _ = find_col_index(cols, ["line_id", "lineid", "line user id", "uid"])
+        # 🌟 關鍵修正：增加 'lind' 容錯，讓 LIND_ID 也能被抓到
+        line_id_idx, line_col_name = find_col_index(cols, ["line_id", "lineid", "line user id", "uid", "lind", "lind_id"])
+
+        if line_id_idx is not None:
+            st.toast(f"✅ 成功辨識 ID 欄位：{line_col_name}", icon="🔍")
 
         if t1_idx is None or ko_idx is None:
-            st.error("❌ 嚴重錯誤：無法辨識關鍵欄位。")
+            st.error("❌ 嚴重錯誤：無法辨識關鍵欄位 (KO 或 標的1)。")
             st.stop()
 
         # 3. 建立資料表
         clean_df = pd.DataFrame()
         clean_df['ID'] = df.iloc[:, id_idx]
-        clean_df['Name'] = df.iloc[:, name_idx] if name_idx else "客戶"
-        # 讀取 Line ID (如果沒找到欄位，就填 None)
+        
+        # 🌟 應用姓名清洗器
+        if name_idx is not None:
+            clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
+        else:
+            clean_df['Name'] = "貴賓"
+            
+        # 讀取 Line ID
         if line_id_idx is not None:
-            clean_df['Line_ID'] = df.iloc[:, line_id_idx].astype(str).replace('nan', '')
+            # 強制轉字串並處理 NaN
+            clean_df['Line_ID'] = df.iloc[:, line_id_idx].astype(str).replace('nan', '').str.strip()
         else:
             clean_df['Line_ID'] = ""
 
@@ -194,8 +213,8 @@ if uploaded_file is not None:
 
         # 5. 運算邏輯
         results = []
-        admin_summary_list = [] # 給管理員的總摘要
-        individual_messages = [] # 待發送的個別訊息 (ID, Message)
+        admin_summary_list = [] 
+        individual_messages = [] 
 
         for index, row in clean_df.iterrows():
             ko_thresh_val = row['KO_Pct'] if pd.notna(row['KO_Pct']) else 100.0
@@ -221,7 +240,6 @@ if uploaded_file is not None:
 
             ticker_data_source = history_data
             
-            # 補價
             for asset in assets:
                 try:
                     if len(all_tickers) == 1: s = ticker_data_source
@@ -235,7 +253,6 @@ if uploaded_file is not None:
                         asset['perf'] = curr / asset['initial']
                 except: asset['price'] = 0
 
-            # 回測
             product_status = "Running"
             early_redemption_date = None
             is_aki = "AKI" in str(row['KI_Type']).upper()
@@ -270,10 +287,9 @@ if uploaded_file is not None:
                             product_status = "Early Redemption"
                             early_redemption_date = date
 
-            # 結果整理
             locked_list = []; waiting_list = []; hit_ki_list = []; shadow_ko_list = []
             detail_cols = {}
-            asset_detail_str = "" # 每個標的的詳細文字(給LINE用)
+            asset_detail_str = "" 
 
             for i, asset in enumerate(assets):
                 if asset['price'] > 0:
@@ -291,13 +307,11 @@ if uploaded_file is not None:
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 price_display = round(asset['price'], 2) if asset['price'] > 0 else "N/A"
                 
-                # 表格顯示用 (有換行)
                 cell_text = f"【{asset['code']}】\n原: {asset['initial']}\n現: {price_display}\n({p_pct}%) {status_icon}"
                 if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
                 detail_cols[f"T{i+1}_Detail"] = cell_text
                 
-                # LINE 訊息用 (簡潔一點)
                 asset_detail_str += f"{asset['code']}: {p_pct}% {status_icon}\n"
 
             hit_any_ki = any(a['hit_ki'] for a in assets)
@@ -308,12 +322,11 @@ if uploaded_file is not None:
                 worst_asset = min(valid_assets, key=lambda x: x['perf'])
                 worst_perf = worst_asset['perf']
                 worst_code = worst_asset['code']
-                worst_strike_price = worst_asset['strike_price']
             else:
-                worst_perf = 0; worst_code = "N/A"; worst_strike_price = 0
+                worst_perf = 0; worst_code = "N/A"
             
             final_status = ""
-            line_status_short = "" # 狀態摘要
+            line_status_short = "" 
 
             if today_ts < row['IssueDate']:
                 final_status = "⏳ 未發行"
@@ -348,11 +361,13 @@ if uploaded_file is not None:
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
             
-            # 收集【個別通知】 (如果有填 Line_ID 且狀態有變動或需要通知)
-            # 這裡設定：只要是 KO, KI, 到期, 或是 KI已破的狀態，都發通知
+            # 收集【個別通知】
             target_id = row.get('Line_ID', '')
-            if target_id and str(target_id).startswith("U") and line_status_short:
-                # 組合個別訊息
+            
+            # 確保 target_id 是字串且不為空
+            target_id_str = str(target_id).strip()
+            
+            if target_id_str and target_id_str.startswith("U") and line_status_short:
                 msg = (f"Hi {row['Name']} 您好，\n"
                        f"您的結構型商品 {row['ID']} 最新狀態：\n\n"
                        f"【{line_status_short}】\n\n"
@@ -360,7 +375,7 @@ if uploaded_file is not None:
                        f"📅 到期日: {mat_date_str}\n"
                        f"------------------\n"
                        f"理財專員貼心通知")
-                individual_messages.append( (target_id, msg) )
+                individual_messages.append( (target_id_str, msg) )
 
             trade_date_str = row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-"
             issue_date_str = row['IssueDate'].strftime('%Y-%m-%d') if pd.notna(row['IssueDate']) else "-"
@@ -368,7 +383,7 @@ if uploaded_file is not None:
             mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
 
             row_res = {
-                "債券代號": row['ID'], "Line_ID": target_id, "天期": row['Tenure'], "收件人": row['Name'],
+                "債券代號": row['ID'], "Line_ID": target_id_str, "天期": row['Tenure'], "收件人": row['Name'],
                 "狀態": final_status, "最差表現": f"{round(worst_perf*100, 2)}%",
                 "KO設定": f"{ko_thresh_val}%", "KI設定": f"{ki_thresh_val}%", "執行價": f"{strike_thresh_val}%",
                 "交易日": trade_date_str, "發行日": issue_date_str, "最終評價": val_date_str, "到期日": mat_date_str
@@ -406,16 +421,17 @@ if uploaded_file is not None:
             st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), use_container_width=True, column_config=column_config, height=600, hide_index=True)
             
             # ==========================================
-            # 🚀 自動發送邏輯 (Auto Send Logic)
+            # 🚀 自動發送邏輯
             # ==========================================
             if auto_send and not st.session_state['is_sent']:
                 count_admin = 0
                 count_individual = 0
                 
                 # 1. 發送個別通知
-                for uid, msg in individual_messages:
-                    if send_line_push(uid, msg):
-                        count_individual += 1
+                with st.spinner("正在發送個別通知..."):
+                    for uid, msg in individual_messages:
+                        if send_line_push(uid, msg):
+                            count_individual += 1
                 
                 # 2. 發送管理員摘要
                 if admin_summary_list:
@@ -435,7 +451,6 @@ if uploaded_file is not None:
                     st.balloons()
                     
             elif not auto_send:
-                # 手動按鈕區
                 st.markdown("### 📢 手動發送操作")
                 if st.button(f"📲 發送 LINE 通知 (預計發送 {len(individual_messages)} 位客戶 + 管理員)", type="primary"):
                     cnt = 0
