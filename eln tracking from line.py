@@ -361,7 +361,7 @@ if uploaded_file is not None:
                        f"{asset_detail_str}"
                        f"📅 到期日: {mat_date_str}\n"
                        f"------------------\n"
-                       f"理財專員貼心通知")
+                       f"貼心通知")
                 
                 # 每個 ID 都加進去發送列表
                 for uid in id_list:
