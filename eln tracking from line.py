@@ -8,7 +8,7 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 戰情室 (精準推播修正版)", layout="wide")
+st.set_page_config(page_title="ELN 戰情室 (手動發送版)", layout="wide")
 
 # ==========================================
 # 🔐 雲端機密讀取
@@ -41,9 +41,10 @@ with st.sidebar:
     real_today = datetime.now()
     st.info(f"📅 今天日期：{real_today.strftime('%Y-%m-%d')}")
     st.caption("鎖定真實日期")
-
+    
+    # 這裡移除了自動發送的勾選框
     st.markdown("---")
-    auto_send = st.checkbox("開啟「上傳即發送」功能", value=True)
+    st.info("💡 **模式：手動發送**\n上傳檔案後，請至頁面最下方按下按鈕才會發送通知。")
 
 # --- 函數區 ---
 def send_line_push(target_user_id, message_text):
@@ -76,7 +77,7 @@ def clean_percentage(val):
         return float(s)
     except: return None
 
-# 🌟 新增：姓名清洗器 (消滅 nan)
+# 姓名清洗器 (消滅 nan)
 def clean_name_str(val):
     if pd.isna(val): return "貴賓"
     s = str(val).strip()
@@ -93,11 +94,12 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
     return None, None
 
 # --- 主畫面 ---
-st.title("📊 ELN 結構型商品 - 精準推播版")
+st.title("📊 ELN 結構型商品 - 手動發送版")
 
 uploaded_file = st.file_uploader("請上傳 Excel (含 Line_ID 欄位)", type=['xlsx', 'csv'], key="uploader")
 
 if uploaded_file:
+    # 如果換了新檔案，重置發送狀態，讓按鈕可以再按一次
     if st.session_state['last_processed_file'] != uploaded_file.name:
         st.session_state['last_processed_file'] = uploaded_file.name
         st.session_state['is_sent'] = False
@@ -111,14 +113,13 @@ if uploaded_file is not None:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file)
 
-        # 簡單的資料清理：如果有空行，刪除之
-        df = df.dropna(how='all')
+        df = df.dropna(how='all') # 刪除全空行
 
         if df.iloc[0].astype(str).str.contains("進場價").any():
             df = df.iloc[1:].reset_index(drop=True)
         cols = df.columns.tolist()
         
-        # 2. 定位欄位 (這裡加強了 LIND_ID 的辨識)
+        # 2. 定位欄位
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id"]) or (0, "")
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
         ko_idx, _ = find_col_index(cols, ["ko", "提前"], exclude_keywords=["strike", "執行", "ki", "type"])
@@ -133,7 +134,7 @@ if uploaded_file is not None:
         maturity_date_idx, _ = find_col_index(cols, ["到期", "maturity"])
         name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
         
-        # 🌟 關鍵修正：增加 'lind' 容錯，讓 LIND_ID 也能被抓到
+        # 關鍵：容錯 LIND_ID
         line_id_idx, line_col_name = find_col_index(cols, ["line_id", "lineid", "line user id", "uid", "lind", "lind_id"])
 
         if line_id_idx is not None:
@@ -147,15 +148,14 @@ if uploaded_file is not None:
         clean_df = pd.DataFrame()
         clean_df['ID'] = df.iloc[:, id_idx]
         
-        # 🌟 應用姓名清洗器
+        # 姓名清洗
         if name_idx is not None:
             clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
         else:
             clean_df['Name'] = "貴賓"
             
-        # 讀取 Line ID
+        # Line ID 清洗
         if line_id_idx is not None:
-            # 強制轉字串並處理 NaN
             clean_df['Line_ID'] = df.iloc[:, line_id_idx].astype(str).replace('nan', '').str.strip()
         else:
             clean_df['Line_ID'] = ""
@@ -357,16 +357,15 @@ if uploaded_file is not None:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
                     line_status_short = f"⚠️ 注意：KI 已跌破 ({','.join(hit_ki_list)})"
 
-            # 收集【給管理員】的摘要 (只收集有狀況的)
+            # 收集【給管理員】的摘要
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
             
             # 收集【個別通知】
             target_id = row.get('Line_ID', '')
-            
-            # 確保 target_id 是字串且不為空
             target_id_str = str(target_id).strip()
             
+            # 必須是 U 開頭且狀態有異常才發
             if target_id_str and target_id_str.startswith("U") and line_status_short:
                 msg = (f"Hi {row['Name']} 您好，\n"
                        f"您的結構型商品 {row['ID']} 最新狀態：\n\n"
@@ -421,47 +420,46 @@ if uploaded_file is not None:
             st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), use_container_width=True, column_config=column_config, height=600, hide_index=True)
             
             # ==========================================
-            # 🚀 自動發送邏輯
+            # 🚀 手動發送按鈕
             # ==========================================
-            if auto_send and not st.session_state['is_sent']:
-                count_admin = 0
-                count_individual = 0
-                
-                # 1. 發送個別通知
-                with st.spinner("正在發送個別通知..."):
-                    for uid, msg in individual_messages:
+            st.markdown("### 📢 發送操作")
+            
+            # 檢查是否有已發送標記
+            if st.session_state['is_sent']:
+                st.success("✅ 本次檔案已發送完成！")
+                if st.button("🔄 重置狀態 (讓我再發一次)"):
+                    st.session_state['is_sent'] = False
+                    st.rerun()
+            else:
+                btn_label = f"📲 發送 LINE 通知 (預計: {len(individual_messages)} 位客戶 + 1 位管理員)"
+                if st.button(btn_label, type="primary"):
+                    success_count = 0
+                    
+                    # 1. 發給個別客戶
+                    progress_text = "正在發送客戶通知..."
+                    my_bar = st.progress(0, text=progress_text)
+                    
+                    total_msgs = len(individual_messages)
+                    for idx, (uid, msg) in enumerate(individual_messages):
                         if send_line_push(uid, msg):
-                            count_individual += 1
-                
-                # 2. 發送管理員摘要
-                if admin_summary_list:
-                    summary_text = f"【ELN 戰情快報 (管理員)】\n📅 {real_today.strftime('%Y/%m/%d')}\n----------------\n" + "\n".join(admin_summary_list)
-                    if count_individual > 0:
-                        summary_text += f"\n\n(已另行發送 {count_individual} 則個別通知給客戶)"
-                else:
-                    summary_text = f"【ELN 戰情快報】\n📅 {real_today.strftime('%Y/%m/%d')}\n----------------\n今日無特殊事件。"
-                
-                # 寄給管理員
-                if send_line_push(MY_LINE_USER_ID, summary_text):
-                    count_admin = 1
-                
-                if count_admin > 0 or count_individual > 0:
-                    st.session_state['is_sent'] = True
-                    st.success(f"✅ 自動發送完成！(管理員: 1 則 / 個別客戶: {count_individual} 則)")
-                    st.balloons()
+                            success_count += 1
+                        if total_msgs > 0:
+                            my_bar.progress((idx + 1) / total_msgs, text=f"發送中... ({idx+1}/{total_msgs})")
                     
-            elif not auto_send:
-                st.markdown("### 📢 手動發送操作")
-                if st.button(f"📲 發送 LINE 通知 (預計發送 {len(individual_messages)} 位客戶 + 管理員)", type="primary"):
-                    cnt = 0
-                    for uid, msg in individual_messages:
-                        if send_line_push(uid, msg): cnt += 1
+                    my_bar.empty()
                     
+                    # 2. 發給管理員
                     if admin_summary_list:
-                        admin_msg = f"【ELN 戰情快報】\n" + "\n".join(admin_summary_list)
+                        admin_msg = f"【ELN 戰情快報】\n📅 {real_today.strftime('%Y/%m/%d')}\n----------------\n" + "\n".join(admin_summary_list)
+                        if success_count > 0:
+                            admin_msg += f"\n\n(已另行發送 {success_count} 則個別通知給客戶)"
                         send_line_push(MY_LINE_USER_ID, admin_msg)
+                    else:
+                        send_line_push(MY_LINE_USER_ID, f"【ELN 戰情快報】\n📅 {real_today.strftime('%Y/%m/%d')}\n今日無特殊事件。")
                     
-                    st.success(f"已發送 {cnt} 則個別通知")
+                    st.session_state['is_sent'] = True
+                    st.success(f"🎉 發送完畢！成功發送 {success_count} 則客戶通知。")
+                    st.balloons()
 
     except Exception as e:
         st.error(f"發生錯誤：{e}")
