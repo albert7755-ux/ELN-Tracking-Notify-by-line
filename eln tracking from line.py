@@ -9,7 +9,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 智能戰情室 (NC修復版)", layout="wide")
+st.set_page_config(page_title="ELN 智能戰情室 (DRA支援版)", layout="wide")
 
 # ==========================================
 # 🔐 雲端機密讀取 (Gmail + LINE)
@@ -54,9 +54,9 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔔 通知過濾")
     lookback_days = st.slider("只通知幾天內發生的事件？", min_value=1, max_value=30, value=3)
-    notify_ki_daily = st.checkbox("KI (跌破) 是否每天提醒？", value=True)
+    notify_ki_daily = st.checkbox("KI/DRA 是否每天提醒？", value=True, help="打勾：只要 KI 跌破或 DRA 沒利息就每天提醒。\n不打勾：只在剛發生時提醒。")
 
-    st.info("💡 **更新說明**\n已修復 NC 判讀邏輯，能正確識別 `NC 2M`, `NC2`, `Daily Memory` 等格式。")
+    st.info("💡 **功能更新**\n✅ 新增 DRA (Daily Range Accrual) 邏輯。\n若標的跌破執行價，狀態會顯示「暫停計息」。")
 
 # --- 函數區 ---
 
@@ -100,19 +100,12 @@ def send_email_gmail(to_email, subject, body_text):
     except Exception as e:
         print(f"Email 發送失敗: {e}"); return False
 
-# 🌟 修正後的 NC 解析函數
 def parse_nc_months(ko_type_val):
     s = str(ko_type_val).upper().strip()
-    if pd.isna(ko_type_val) or s == "" or s == "NAN": return 1 # 預設值
-    
-    # 嘗試抓取 "NC" 或 "LOCK" 後面的數字
+    if pd.isna(ko_type_val) or s == "" or s == "NAN": return 1 
     match = re.search(r'(?:NC|LOCK|NON-CALL)\s*[:\-]?\s*(\d+)', s)
-    if match:
-        return int(match.group(1))
-    
-    # 如果寫 "Daily Memory" 但沒寫 NC，通常代表 NC1 (或看貴行慣例)
+    if match: return int(match.group(1))
     if "DAILY" in s: return 1
-    
     return 1
 
 def clean_percentage(val):
@@ -165,9 +158,9 @@ def calculate_maturity(row, issue_date_col, tenure_col):
     return pd.NaT
 
 # --- 主畫面 ---
-st.title("📊 ELN 智能戰情室 - NC修復版")
+st.title("📊 ELN 智能戰情室 - DRA 支援版")
 
-uploaded_file = st.file_uploader("請上傳 Excel", type=['xlsx', 'csv'], key="uploader")
+uploaded_file = st.file_uploader("請上傳 Excel (支援 FCN / DRA)", type=['xlsx', 'csv'], key="uploader")
 
 if uploaded_file:
     if st.session_state['last_processed_file'] != uploaded_file.name:
@@ -190,9 +183,10 @@ if uploaded_file is not None:
         
         # 欄位定位
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id", "商品代號"]) or (0, "")
+        type_idx, _ = find_col_index(cols, ["商品類型", "Product Type", "type"], exclude_keywords=["ko", "ki"]) # 🌟 抓取商品類型 (FCN/DRA)
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
         ko_idx, _ = find_col_index(cols, ["ko", "提前"], exclude_keywords=["strike", "執行", "ki", "type"])
-        ko_type_idx, _ = find_col_index(cols, ["ko類型", "ko type"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko"])
+        ko_type_idx, _ = find_col_index(cols, ["ko類型", "ko type"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko", "商品"])
         ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
         ki_type_idx, _ = find_col_index(cols, ["ki類型", "ki type"])
         t1_idx, _ = find_col_index(cols, ["標的1", "ticker 1"])
@@ -219,6 +213,12 @@ if uploaded_file is not None:
         else: clean_df['Line_ID'] = ""
         if email_idx is not None: clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
         else: clean_df['Email'] = ""
+        
+        # 🌟 讀取商品類型
+        if type_idx is not None:
+            clean_df['Product_Type'] = df.iloc[:, type_idx].astype(str).fillna("FCN")
+        else:
+            clean_df['Product_Type'] = "FCN"
 
         clean_df['TradeDate'] = pd.to_datetime(df.iloc[:, trade_date_idx], errors='coerce') if trade_date_idx else pd.NaT
         clean_df['IssueDate'] = pd.to_datetime(df.iloc[:, issue_date_idx], errors='coerce') if issue_date_idx else pd.Timestamp.min
@@ -247,8 +247,7 @@ if uploaded_file is not None:
         clean_df['KI_Pct'] = df.iloc[:, ki_idx].apply(clean_percentage)
         clean_df['Strike_Pct'] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx else 100.0
         
-        # 讀取 KO 類型
-        clean_df['KO_Type'] = df.iloc[:, ko_type_idx] if ko_type_idx else "NC1" # 如果沒欄位預設 NC1
+        clean_df['KO_Type'] = df.iloc[:, ko_type_idx] if ko_type_idx else "NC1" 
         clean_df['KI_Type'] = df.iloc[:, ki_type_idx] if ki_type_idx else "AKI"
 
         for i in range(1, 6):
@@ -316,13 +315,15 @@ if uploaded_file is not None:
             ko_thresh = ko_thresh_val / 100.0
             ki_thresh = ki_thresh_val / 100.0
             strike_thresh = strike_thresh_val / 100.0
-            
-            # 🌟 呼叫修正後的 NC 解析
             nc_months = parse_nc_months(row['KO_Type'])
             nc_end_date = row['IssueDate'] + relativedelta(months=nc_months)
             
+            # 🌟 判斷是否為 DRA
+            is_dra = "DRA" in str(row['Product_Type']).upper()
+            
             assets = []
             
+            # --- 處理每一個標的 ---
             for i in range(1, 6):
                 code = row.get(f'T{i}_Code', "")
                 if code == "": continue
@@ -400,13 +401,22 @@ if uploaded_file is not None:
                             product_status = "Early Redemption"
                             early_redemption_date = date
 
-            locked_list = []; waiting_list = []; hit_ki_list = []
+            locked_list = []; waiting_list = []; hit_ki_list = []; shadow_ko_list = []
             detail_cols = {}
             asset_detail_str = "" 
+
+            # 🌟 DRA 邏輯變數
+            any_below_strike_today = False
+            dra_fail_list = []
 
             for i, asset in enumerate(assets):
                 if asset['price'] > 0:
                     if not is_aki and asset['perf'] < ki_thresh: asset['hit_ki'] = True 
+                    
+                    # 🌟 檢查是否跌破執行價 (for DRA)
+                    if is_dra and asset['perf'] < strike_thresh:
+                        any_below_strike_today = True
+                        dra_fail_list.append(asset['code'])
 
                 if asset['locked_ko']: locked_list.append(asset['code'])
                 else: waiting_list.append(asset['code'])
@@ -415,6 +425,11 @@ if uploaded_file is not None:
                 p_pct = round(asset['perf']*100, 2) if asset['price'] > 0 else 0.0
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
+                # 🌟 DRA 額外顯示
+                if is_dra and asset['price'] > 0:
+                    if asset['perf'] < strike_thresh: status_icon += "🛑無息"
+                    else: status_icon += "💸"
+
                 price_display = round(asset['price'], 2) if asset['price'] > 0 else "N/A"
                 initial_display = round(asset['initial'], 2)
                 
@@ -463,6 +478,7 @@ if uploaded_file is not None:
                 need_notify = is_recent
                 if not is_recent: line_status_short += " (舊)"
             else:
+                # 執行中
                 if today_ts < nc_end_date:
                     final_status = f"🔒 NC閉鎖期\n(至 {nc_end_date.strftime('%Y-%m-%d')})"
                 else:
@@ -472,6 +488,21 @@ if uploaded_file is not None:
                     final_status += f"\n⚠️ KI已破"
                     line_status_short = f"⚠️ 注意：KI 已跌破 ({','.join(hit_ki_list)})"
                     need_notify = notify_ki_daily
+                
+                # 🌟 DRA 狀態判斷
+                if is_dra:
+                    if any_below_strike_today:
+                        final_status += f"\n🛑 DRA暫停計息 ({','.join(dra_fail_list)}跌破)"
+                        # 如果是 DRA 且跌破，視為需要通知的事件 (若勾選每天提醒)
+                        if notify_ki_daily: 
+                            line_status_short = f"⚠️ DRA 暫停計息 ({','.join(dra_fail_list)} 跌破執行價)"
+                            need_notify = True
+                    else:
+                        final_status += "\n💸 DRA計息中 (全數高於執行價)"
+                        # 恢復計息也可以通知，或者只通知壞消息，這裡設定為若之前沒狀態，現在可以顯示好消息
+                        if not line_status_short: # 如果沒有其他壞消息(如破KI)
+                            # 可以選擇是否通知「計息中」，這裡預設不每天騷擾，除非剛好是觀察日
+                            pass 
 
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
@@ -482,7 +513,7 @@ if uploaded_file is not None:
             mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
             common_msg_body = (
                 f"Hi {row['Name']} 您好，\n"
-                f"您的結構型商品 {row['ID']} 最新狀態：\n\n"
+                f"您的結構型商品 {row['ID']} ({row['Product_Type']}) 最新狀態：\n\n"
                 f"【{line_status_short}】\n\n"
                 f"{asset_detail_str}"
                 f"📅 到期日: {mat_date_str}\n"
@@ -501,10 +532,10 @@ if uploaded_file is not None:
                         individual_messages.append({'type': 'email', 'target': mail, 'subj': subject, 'msg': mail_body})
 
             row_res = {
-                "債券代號": row['ID'], "Name": row['Name'],
+                "債券代號": row['ID'], "Name": row['Name'], "Type": row['Product_Type'],
                 "狀態": final_status, "最差表現": f"{round(worst_perf*100, 2)}%",
                 "交易日": row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-",
-                "NC月份": f"{nc_months}M", # 顯示判讀到的 NC
+                "NC月份": f"{nc_months}M",
             }
             row_res.update(detail_cols)
             results.append(row_res)
@@ -515,13 +546,13 @@ if uploaded_file is not None:
             final_df = pd.DataFrame(results)
             
             def color_status(val):
-                if "提前" in str(val) or "獲利" in str(val): return 'background-color: #d4edda; color: green'
-                if "接股" in str(val) or "KI" in str(val): return 'background-color: #f8d7da; color: red'
+                if "提前" in str(val) or "獲利" in str(val) or "計息中" in str(val): return 'background-color: #d4edda; color: green'
+                if "接股" in str(val) or "KI" in str(val) or "暫停" in str(val): return 'background-color: #f8d7da; color: red'
                 if "未發行" in str(val) or "NC" in str(val): return 'background-color: #fff3cd; color: #856404'
                 return ''
 
             t_cols = [c for c in final_df.columns if '_Detail' in c]; t_cols.sort()
-            display_cols = ['債券代號', 'Name', '狀態', 'NC月份', '最差表現'] + t_cols + ['交易日']
+            display_cols = ['債券代號', 'Type', 'Name', '狀態', '最差表現'] + t_cols + ['交易日']
             
             st.subheader("📋 監控列表")
             st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), height=600, use_container_width=True)
