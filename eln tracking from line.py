@@ -8,7 +8,7 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 智能戰情室 (KI修復版)", layout="wide")
+st.set_page_config(page_title="ELN 智能戰情室 (KI優先版)", layout="wide")
 
 # ==========================================
 # 🔐 雲端機密讀取 (LINE)
@@ -47,7 +47,7 @@ with st.sidebar:
     lookback_days = st.slider("只通知幾天內發生的事件？", min_value=1, max_value=30, value=3)
     notify_ki_daily = st.checkbox("KI/DRA 是否每天提醒？", value=True, help="打勾：持續跌破期間每天都會通知。")
 
-    st.warning("⚠️ **安全模式已啟動**\n只要跌破 KI，狀態將強制顯示紅色並置頂警告！")
+    st.warning("⚠️ **安全模式**\nKI 跌破訊息將強制置頂顯示，不會被 DRA 狀態掩蓋。")
 
 # --- 函數區 ---
 
@@ -263,7 +263,6 @@ if uploaded_file is not None:
             st.error(f"美股連線失敗: {e}")
             st.stop()
 
-        # 5. 核心運算
         results = []
         individual_messages = [] 
         admin_summary_list = []
@@ -287,7 +286,6 @@ if uploaded_file is not None:
             for i in range(1, 6):
                 code = row.get(f'T{i}_Code', "")
                 if code == "": continue
-                
                 initial = float(row.get(f'T{i}_Initial', 0))
                 
                 if initial == 0:
@@ -325,7 +323,6 @@ if uploaded_file is not None:
             early_redemption_date = None
             is_aki = "AKI" in str(row['KI_Type']).upper()
 
-            # 回測邏輯
             if row['IssueDate'] <= today_ts:
                 backtest_data = history_data[(history_data.index >= row['IssueDate']) & (history_data.index <= today_ts)]
                 if not backtest_data.empty:
@@ -345,7 +342,6 @@ if uploaded_file is not None:
                             perf = price / asset['initial']
                             date_str = date.strftime('%Y/%m/%d')
                             
-                            # KI 判斷 (AKI: 每日觀察)
                             if is_aki and perf < ki_thresh and not asset['hit_ki']:
                                 asset['hit_ki'] = True
                                 asset['ki_record'] = f"@{price:.2f} ({date_str})"
