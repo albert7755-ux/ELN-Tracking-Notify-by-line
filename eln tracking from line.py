@@ -9,21 +9,17 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 智能戰情室 (DRA支援版)", layout="wide")
+st.set_page_config(page_title="ELN 智能戰情室 (Email 修復版)", layout="wide")
 
 # ==========================================
-# 🔐 雲端機密讀取 (Gmail + LINE)
+# 🔐 雲端機密讀取 (Gmail)
 # ==========================================
 try:
-    LINE_ACCESS_TOKEN = st.secrets.get("LINE_ACCESS_TOKEN", "")
-    MY_LINE_USER_ID = st.secrets.get("MY_LINE_USER_ID", "")
     GMAIL_ACCOUNT = st.secrets.get("GMAIL_ACCOUNT", "")
     GMAIL_PASSWORD = st.secrets.get("GMAIL_PASSWORD", "")
     ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL", GMAIL_ACCOUNT)
 except Exception:
-    st.error("⚠️ Secrets 設定讀取異常，部分功能可能無法使用。")
-    LINE_ACCESS_TOKEN = ""
-    MY_LINE_USER_ID = ""
+    st.error("⚠️ Secrets 設定讀取異常，Email 功能可能無法使用。")
     GMAIL_ACCOUNT = ""
     GMAIL_PASSWORD = ""
     ADMIN_EMAIL = ""
@@ -38,13 +34,12 @@ if 'is_sent' not in st.session_state:
 
 # --- 側邊欄 ---
 with st.sidebar:
-    st.header("⚙️ 設定中心")
+    st.header("✉️ 設定中心")
     
-    status_text = ""
-    if LINE_ACCESS_TOKEN: status_text += "✅ LINE 連線 OK\n"
-    if GMAIL_ACCOUNT: status_text += "✅ Email 連線 OK"
-    if not status_text: status_text = "⚠️ 未設定連線金鑰"
-    st.success(status_text)
+    if GMAIL_ACCOUNT and GMAIL_PASSWORD:
+        st.success(f"✅ Email 連線 OK\n({GMAIL_ACCOUNT})")
+    else:
+        st.error("❌ Email 未設定 (請檢查 Secrets)")
 
     st.markdown("---")
     real_today = datetime.now()
@@ -54,9 +49,9 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔔 通知過濾")
     lookback_days = st.slider("只通知幾天內發生的事件？", min_value=1, max_value=30, value=3)
-    notify_ki_daily = st.checkbox("KI/DRA 是否每天提醒？", value=True, help="打勾：只要 KI 跌破或 DRA 沒利息就每天提醒。\n不打勾：只在剛發生時提醒。")
+    notify_ki_daily = st.checkbox("KI/DRA 是否每天提醒？", value=True)
 
-    st.info("💡 **功能更新**\n✅ 新增 DRA (Daily Range Accrual) 邏輯。\n若標的跌破執行價，狀態會顯示「暫停計息」。")
+    st.info("💡 **修復說明**\n✅ 已修正 `KO 類型` 欄位因為空格導致讀取失敗的問題。\n✅ 現在能正確抓到 NC 2M 了！")
 
 # --- 函數區 ---
 
@@ -70,19 +65,6 @@ def clean_ticker_symbol(ticker):
     if t.endswith(" HK"): return t.replace(" HK", ".HK") 
     return t
 
-def send_line_push(target_user_id, message_text):
-    if not LINE_ACCESS_TOKEN or not target_user_id: return False
-    from linebot import LineBotApi
-    from linebot.models import TextSendMessage
-    try:
-        uid = str(target_user_id).strip()
-        if not uid.startswith("U") or len(uid) < 10: return False
-        line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
-        line_bot_api.push_message(uid, TextSendMessage(text=message_text))
-        return True
-    except Exception as e:
-        print(f"LINE 發送失敗: {e}"); return False
-
 def send_email_gmail(to_email, subject, body_text):
     if not GMAIL_ACCOUNT or not GMAIL_PASSWORD or not to_email: return False
     if "@" not in str(to_email): return False
@@ -92,14 +74,17 @@ def send_email_gmail(to_email, subject, body_text):
         msg['To'] = str(to_email).strip()
         msg['Subject'] = subject
         msg.attach(MIMEText(body_text, 'plain'))
+
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(GMAIL_ACCOUNT, GMAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
         return True
     except Exception as e:
-        print(f"Email 發送失敗: {e}"); return False
+        print(f"Email 發送失敗 ({to_email}): {e}")
+        return False
 
+# 🌟 NC 智慧判讀
 def parse_nc_months(ko_type_val):
     s = str(ko_type_val).upper().strip()
     if pd.isna(ko_type_val) or s == "" or s == "NAN": return 1 
@@ -108,28 +93,7 @@ def parse_nc_months(ko_type_val):
     if "DAILY" in s: return 1
     return 1
 
-def clean_percentage(val):
-    if pd.isna(val) or str(val).strip() == "": return None
-    try:
-        s = str(val).replace('%', '').replace(',', '').strip()
-        return float(s)
-    except: return None
-
-def clean_name_str(val):
-    if pd.isna(val): return "貴賓"
-    s = str(val).strip()
-    if s.lower() == 'nan' or s == "": return "貴賓"
-    return s
-
-def find_col_index(columns, include_keywords, exclude_keywords=None):
-    for idx, col_name in enumerate(columns):
-        col_str = str(col_name).strip().lower()
-        if exclude_keywords:
-            if any(ex in col_str for ex in exclude_keywords): continue
-        if any(inc in col_str for inc in include_keywords):
-            return idx, col_name
-    return None, None
-
+# 🌟 自動推算到期日
 def calculate_maturity(row, issue_date_col, tenure_col):
     if 'MaturityDate' in row and pd.notna(row['MaturityDate']):
         return row['MaturityDate']
@@ -157,10 +121,35 @@ def calculate_maturity(row, issue_date_col, tenure_col):
     except: pass
     return pd.NaT
 
-# --- 主畫面 ---
-st.title("📊 ELN 智能戰情室 - DRA 支援版")
+def clean_percentage(val):
+    if pd.isna(val) or str(val).strip() == "": return None
+    try:
+        s = str(val).replace('%', '').replace(',', '').strip()
+        return float(s)
+    except: return None
 
-uploaded_file = st.file_uploader("請上傳 Excel (支援 FCN / DRA)", type=['xlsx', 'csv'], key="uploader")
+def clean_name_str(val):
+    if pd.isna(val): return "貴賓"
+    s = str(val).strip()
+    if s.lower() == 'nan' or s == "": return "貴賓"
+    return s
+
+# 🌟 升級版欄位搜尋器 (無視空格)
+def find_col_index(columns, include_keywords, exclude_keywords=None):
+    for idx, col_name in enumerate(columns):
+        # 關鍵：把欄位名稱的空格全部拿掉再比對 (KO 類型 -> ko類型)
+        col_str = str(col_name).strip().lower().replace(" ", "")
+        
+        if exclude_keywords:
+            if any(ex in col_str for ex in exclude_keywords): continue
+        if any(inc in col_str for inc in include_keywords):
+            return idx, col_name
+    return None, None
+
+# --- 主畫面 ---
+st.title("📊 ELN 智能戰情室 - Email 修復版")
+
+uploaded_file = st.file_uploader("請上傳 Excel (支援 FCN/DRA, 新舊格式)", type=['xlsx', 'csv'], key="uploader")
 
 if uploaded_file:
     if st.session_state['last_processed_file'] != uploaded_file.name:
@@ -183,13 +172,13 @@ if uploaded_file is not None:
         
         # 欄位定位
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id", "商品代號"]) or (0, "")
-        type_idx, _ = find_col_index(cols, ["商品類型", "Product Type", "type"], exclude_keywords=["ko", "ki"]) # 🌟 抓取商品類型 (FCN/DRA)
+        type_idx, _ = find_col_index(cols, ["商品類型", "ProductType", "type"], exclude_keywords=["ko", "ki"]) 
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
         ko_idx, _ = find_col_index(cols, ["ko", "提前"], exclude_keywords=["strike", "執行", "ki", "type"])
-        ko_type_idx, _ = find_col_index(cols, ["ko類型", "ko type"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko", "商品"])
+        ko_type_idx, _ = find_col_index(cols, ["ko類型", "kotype"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko", "商品"])
         ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
-        ki_type_idx, _ = find_col_index(cols, ["ki類型", "ki type"])
-        t1_idx, _ = find_col_index(cols, ["標的1", "ticker 1"])
+        ki_type_idx, _ = find_col_index(cols, ["ki類型", "kitype"])
+        t1_idx, _ = find_col_index(cols, ["標的1", "ticker1"])
         
         trade_date_idx, _ = find_col_index(cols, ["交易日"])
         issue_date_idx, _ = find_col_index(cols, ["發行日"])
@@ -198,7 +187,6 @@ if uploaded_file is not None:
         tenure_idx, _ = find_col_index(cols, ["天期", "term", "tenure"])
         
         name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
-        line_id_idx, _ = find_col_index(cols, ["line_id", "lineid", "line user id", "uid"])
         email_idx, _ = find_col_index(cols, ["email", "e-mail", "mail", "信箱"])
 
         if t1_idx is None:
@@ -209,12 +197,10 @@ if uploaded_file is not None:
         clean_df['ID'] = df.iloc[:, id_idx]
         if name_idx is not None: clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
         else: clean_df['Name'] = "貴賓"
-        if line_id_idx is not None: clean_df['Line_ID'] = df.iloc[:, line_id_idx].astype(str).replace('nan', '').str.strip()
-        else: clean_df['Line_ID'] = ""
         if email_idx is not None: clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
         else: clean_df['Email'] = ""
         
-        # 🌟 讀取商品類型
+        # 抓取商品類型 (FCN / DRA)
         if type_idx is not None:
             clean_df['Product_Type'] = df.iloc[:, type_idx].astype(str).fillna("FCN")
         else:
@@ -243,10 +229,12 @@ if uploaded_file is not None:
             return "-"
         clean_df['Tenure'] = clean_df.apply(calc_tenure_display, axis=1)
 
+        # 處理百分比與參數
         clean_df['KO_Pct'] = df.iloc[:, ko_idx].apply(clean_percentage)
         clean_df['KI_Pct'] = df.iloc[:, ki_idx].apply(clean_percentage)
         clean_df['Strike_Pct'] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx else 100.0
         
+        # 讀取時，如果抓不到欄位，會使用預設值
         clean_df['KO_Type'] = df.iloc[:, ko_type_idx] if ko_type_idx else "NC1" 
         clean_df['KI_Type'] = df.iloc[:, ki_type_idx] if ki_type_idx else "AKI"
 
@@ -277,6 +265,7 @@ if uploaded_file is not None:
 
         clean_df = clean_df.dropna(subset=['ID'])
 
+        # 4. 下載股價
         today_ts = pd.Timestamp(real_today)
         min_trade_date = clean_df['TradeDate'].min()
         
@@ -302,6 +291,7 @@ if uploaded_file is not None:
             st.error(f"美股連線失敗: {e}")
             st.stop()
 
+        # 5. 核心運算
         results = []
         individual_messages = [] 
         admin_summary_list = []
@@ -318,12 +308,11 @@ if uploaded_file is not None:
             nc_months = parse_nc_months(row['KO_Type'])
             nc_end_date = row['IssueDate'] + relativedelta(months=nc_months)
             
-            # 🌟 判斷是否為 DRA
             is_dra = "DRA" in str(row['Product_Type']).upper()
             
             assets = []
             
-            # --- 處理每一個標的 ---
+            # 標的與價格
             for i in range(1, 6):
                 code = row.get(f'T{i}_Code', "")
                 if code == "": continue
@@ -343,9 +332,7 @@ if uploaded_file is not None:
                 
                 if initial > 0:
                     assets.append({
-                        'code': code, 
-                        'initial': initial, 
-                        'strike_price': initial * strike_thresh, 
+                        'code': code, 'initial': initial, 'strike_price': initial * strike_thresh, 
                         'locked_ko': False, 'hit_ki': False, 'perf': 0.0, 'price': 0.0,
                         'ko_record': '', 'ki_record': ''
                     })
@@ -401,19 +388,15 @@ if uploaded_file is not None:
                             product_status = "Early Redemption"
                             early_redemption_date = date
 
-            locked_list = []; waiting_list = []; hit_ki_list = []; shadow_ko_list = []
+            locked_list = []; waiting_list = []; hit_ki_list = []
             detail_cols = {}
             asset_detail_str = "" 
-
-            # 🌟 DRA 邏輯變數
             any_below_strike_today = False
             dra_fail_list = []
 
             for i, asset in enumerate(assets):
                 if asset['price'] > 0:
                     if not is_aki and asset['perf'] < ki_thresh: asset['hit_ki'] = True 
-                    
-                    # 🌟 檢查是否跌破執行價 (for DRA)
                     if is_dra and asset['perf'] < strike_thresh:
                         any_below_strike_today = True
                         dra_fail_list.append(asset['code'])
@@ -425,7 +408,6 @@ if uploaded_file is not None:
                 p_pct = round(asset['perf']*100, 2) if asset['price'] > 0 else 0.0
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
-                # 🌟 DRA 額外顯示
                 if is_dra and asset['price'] > 0:
                     if asset['perf'] < strike_thresh: status_icon += "🛑無息"
                     else: status_icon += "💸"
@@ -478,7 +460,6 @@ if uploaded_file is not None:
                 need_notify = is_recent
                 if not is_recent: line_status_short += " (舊)"
             else:
-                # 執行中
                 if today_ts < nc_end_date:
                     final_status = f"🔒 NC閉鎖期\n(至 {nc_end_date.strftime('%Y-%m-%d')})"
                 else:
@@ -489,25 +470,18 @@ if uploaded_file is not None:
                     line_status_short = f"⚠️ 注意：KI 已跌破 ({','.join(hit_ki_list)})"
                     need_notify = notify_ki_daily
                 
-                # 🌟 DRA 狀態判斷
                 if is_dra:
                     if any_below_strike_today:
                         final_status += f"\n🛑 DRA暫停計息 ({','.join(dra_fail_list)}跌破)"
-                        # 如果是 DRA 且跌破，視為需要通知的事件 (若勾選每天提醒)
                         if notify_ki_daily: 
                             line_status_short = f"⚠️ DRA 暫停計息 ({','.join(dra_fail_list)} 跌破執行價)"
                             need_notify = True
                     else:
                         final_status += "\n💸 DRA計息中 (全數高於執行價)"
-                        # 恢復計息也可以通知，或者只通知壞消息，這裡設定為若之前沒狀態，現在可以顯示好消息
-                        if not line_status_short: # 如果沒有其他壞消息(如破KI)
-                            # 可以選擇是否通知「計息中」，這裡預設不每天騷擾，除非剛好是觀察日
-                            pass 
 
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
 
-            line_ids = [x.strip() for x in re.split(r'[;,，]', str(row.get('Line_ID', ''))) if x.strip()]
             emails = [x.strip() for x in re.split(r'[;,，]', str(row.get('Email', ''))) if x.strip()]
             
             mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
@@ -521,15 +495,12 @@ if uploaded_file is not None:
                 f"貼心通知"
             )
 
-            if need_notify and line_status_short:
-                for uid in line_ids:
-                    if uid.startswith("U") or uid.startswith("C"):
-                        individual_messages.append({'type': 'line', 'target': uid, 'msg': common_msg_body})
+            if need_notify and line_status_short and emails:
                 for mail in emails:
                     if "@" in mail:
                         subject = f"【ELN通知】{row['ID']} 最新狀態"
                         mail_body = common_msg_body + "\n(本信件由系統自動發送)"
-                        individual_messages.append({'type': 'email', 'target': mail, 'subj': subject, 'msg': mail_body})
+                        individual_messages.append({'email': mail, 'subj': subject, 'msg': mail_body})
 
             row_res = {
                 "債券代號": row['ID'], "Name": row['Name'], "Type": row['Product_Type'],
@@ -560,36 +531,36 @@ if uploaded_file is not None:
             st.markdown("### 📢 發送操作")
             
             if st.session_state['is_sent']:
-                st.success("✅ 發送完成！")
+                st.success("✅ Email 發送完成！")
                 if st.button("🔄 重置"):
                     st.session_state['is_sent'] = False
                     st.rerun()
             else:
                 count = len(individual_messages)
-                btn_label = f"🚀 發送通知 (預計: {count} 則)"
+                btn_label = f"📧 發送 Email (預計: {count} 則)"
                 
                 if st.button(btn_label, type="primary"):
+                    
+                    if admin_summary_list and ADMIN_EMAIL:
+                        summary_text = f"今日摘要报告 ({real_today.strftime('%Y/%m/%d')})\n----------------\n" + "\n".join(admin_summary_list)
+                        if count > 0: summary_text += f"\n\n(系統將發送 {count} 封客戶信件)"
+                        else: summary_text += f"\n\n(今日無須發送客戶信件)"
+                        
+                        send_email_gmail(ADMIN_EMAIL, f"【ELN 戰情快報 (Admin)】 {real_today.strftime('%Y/%m/%d')}", summary_text)
+                        st.toast("✅ 管理員摘要信件已發送", icon="📧")
+
                     success_cnt = 0
-                    bar = st.progress(0, text="發送中...")
+                    bar = st.progress(0, text="正在寄送客戶通知...")
                     
                     for idx, item in enumerate(individual_messages):
-                        res = False
-                        if item['type'] == 'line':
-                            res = send_line_push(item['target'], item['msg'])
-                        elif item['type'] == 'email':
-                            res = send_email_gmail(item['target'], item['subj'], item['msg'])
-                        
-                        if res: success_cnt += 1
+                        if send_email_gmail(item['email'], item['subj'], item['msg']):
+                            success_cnt += 1
                         bar.progress((idx+1)/count)
                     
                     bar.empty()
-                    
-                    if admin_summary_list and MY_LINE_USER_ID:
-                        summary = "【ELN 戰情快報】\n" + "\n".join(admin_summary_list)
-                        send_line_push(MY_LINE_USER_ID, summary)
 
                     st.session_state['is_sent'] = True
-                    st.success(f"🎉 成功發送 {success_cnt} 則通知！")
+                    st.success(f"🎉 成功寄出 {success_cnt} 封信件！")
                     st.balloons()
 
     except Exception as e:
