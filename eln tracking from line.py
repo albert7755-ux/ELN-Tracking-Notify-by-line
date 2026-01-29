@@ -8,17 +8,17 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 智能戰情室 (EKI優化版)", layout="wide")
+st.set_page_config(page_title="ELN 戰情室 (最終完美版)", layout="wide")
 
 # ==========================================
 # 🔐 雲端機密讀取 (LINE)
 # ==========================================
 try:
+    # 嘗試讀取 Secrets，如果沒設定也不會報錯，只是變數為空
     LINE_ACCESS_TOKEN = st.secrets.get("LINE_ACCESS_TOKEN", "")
     MY_LINE_USER_ID = st.secrets.get("MY_LINE_USER_ID", "")
     LINE_GROUP_ID = st.secrets.get("LINE_GROUP_ID", "") 
 except Exception:
-    st.error("⚠️ Secrets 設定不完整！")
     LINE_ACCESS_TOKEN = ""
     MY_LINE_USER_ID = ""
     LINE_GROUP_ID = ""
@@ -33,9 +33,13 @@ if 'is_sent' not in st.session_state:
 
 # --- 側邊欄 ---
 with st.sidebar:
-    st.header("💬 設定中心")
-    if LINE_ACCESS_TOKEN: st.success(f"✅ LINE 連線 OK")
-    else: st.error("❌ LINE 未設定")
+    st.header("⚙️ 設定中心")
+    
+    # 狀態檢查：有 Token 就顯示綠燈，沒有就顯示手動模式
+    if LINE_ACCESS_TOKEN and MY_LINE_USER_ID:
+        st.success(f"✅ LINE 連線 OK")
+    else:
+        st.info("✅ 手動廣播模式 (無須連線)")
 
     st.markdown("---")
     real_today = datetime.now()
@@ -43,11 +47,11 @@ with st.sidebar:
     st.caption("鎖定為真實日期")
     
     st.markdown("---")
-    st.header("🔔 通知過濾")
-    lookback_days = st.slider("只通知幾天內發生的事件？", min_value=1, max_value=30, value=3)
+    st.header("🔔 篩選設定")
+    lookback_days = st.slider("顯示幾天內發生的事件？", min_value=1, max_value=30, value=3)
     notify_ki_daily = st.checkbox("AKI/DRA 是否每天提醒？", value=True)
 
-    st.info("💡 **優化更新**\n✅ EKI 跌破時僅顯示於列表，**不發送通知** (避免干擾)。\n✅ AKI 跌破維持強制通知。")
+    st.info("💡 **功能全開**\n✅ 自動計算 KI/KO/DRA\n✅ 支援手動複製文案\n✅ 支援 LINE 一鍵發送")
 
 # --- 函數區 ---
 
@@ -134,7 +138,7 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
     return None, None
 
 # --- 主畫面 ---
-st.title("📊 ELN 智能戰情室 - EKI優化版")
+st.title("📊 ELN 智能戰情室")
 
 uploaded_file = st.file_uploader("請上傳 Excel", type=['xlsx', 'csv'], key="uploader")
 
@@ -156,6 +160,7 @@ if uploaded_file is not None:
             df = df.iloc[1:].reset_index(drop=True)
         cols = df.columns.tolist()
         
+        # 欄位定位
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id", "商品代號"]) or (0, "")
         type_idx, _ = find_col_index(cols, ["商品類型", "ProductType", "type"], exclude_keywords=["ko", "ki"]) 
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
@@ -172,20 +177,18 @@ if uploaded_file is not None:
         tenure_idx, _ = find_col_index(cols, ["天期", "term", "tenure"])
         name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
         line_id_idx, line_col_name = find_col_index(cols, ["line_id", "lineid", "lineuserid", "uid", "lind"])
-        email_idx, _ = find_col_index(cols, ["email", "e-mail", "mail", "信箱"])
 
         if t1_idx is None:
             st.error("❌ 無法辨識「標的1」欄位，請檢查 Excel 表頭。")
             st.stop()
 
+        # 建立資料表
         clean_df = pd.DataFrame()
         clean_df['ID'] = df.iloc[:, id_idx]
         if name_idx is not None: clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
         else: clean_df['Name'] = "貴賓"
         if line_id_idx is not None: clean_df['Line_ID'] = df.iloc[:, line_id_idx].astype(str).replace('nan', '').str.strip()
         else: clean_df['Line_ID'] = ""
-        if email_idx is not None: clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
-        else: clean_df['Email'] = ""
         
         if type_idx is not None:
             clean_df['Product_Type'] = df.iloc[:, type_idx].astype(str).fillna("FCN")
@@ -306,7 +309,7 @@ if uploaded_file is not None:
                         'code': code, 'initial': initial, 'strike_price': initial * strike_thresh, 
                         'locked_ko': False, 'hit_ki': False, 'perf': 0.0, 'price': 0.0, 
                         'ko_record': '', 'ki_record': '',
-                        'eki_risk': False # 🌟 新增 EKI 風險標記
+                        'eki_risk': False
                     })
             if not assets: continue
 
@@ -361,12 +364,10 @@ if uploaded_file is not None:
                             perf = price / asset['initial']
                             date_str = date.strftime('%Y/%m/%d')
                             
-                            # 🌟 AKI (每日比) -> 跌破就算 hit_ki
+                            # AKI 判斷
                             if is_aki and perf < ki_thresh and not asset['hit_ki']:
                                 asset['hit_ki'] = True
                                 asset['ki_record'] = f"@{price:.2f} ({date_str})"
-                            
-                            # EKI (到期比) -> 過程中有跌破不算 hit_ki (所以這裡不動)
                             
                             if not asset['locked_ko']:
                                 if is_post_nc:
@@ -384,15 +385,16 @@ if uploaded_file is not None:
             detail_cols = {}
             any_below_strike_today = False
             dra_fail_list = []
-            any_eki_risk_today = False # 🌟 EKI 風險標記
+            any_eki_risk_today = False 
+            
+            # 🌟 [修復點] 這裡之前忘了初始化，現在加回來了！
+            asset_detail_str = "" 
 
             for i, asset in enumerate(assets):
                 if asset['price'] > 0:
-                    # 🌟 區分 AKI 與 EKI 的當日判斷
                     if is_aki:
                         if asset['perf'] < ki_thresh: asset['hit_ki'] = True 
                     else:
-                        # EKI: 雖然不從 hit_ki 觸發，但要標記目前低於 KI
                         if asset['perf'] < ki_thresh: 
                             asset['eki_risk'] = True
                             any_eki_risk_today = True
@@ -408,7 +410,6 @@ if uploaded_file is not None:
                 p_pct = round(asset['perf']*100, 2) if asset['price'] > 0 else 0.0
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
-                # 🌟 EKI 特殊圖示 (橘色警告)
                 if asset['eki_risk']: status_icon = "📉"
 
                 if is_dra and asset['price'] > 0:
@@ -421,8 +422,11 @@ if uploaded_file is not None:
                 if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
                 detail_cols[f"T{i+1}_Detail"] = cell_text
+                
+                # 🌟 [修復點] 這裡開始組裝字串
+                asset_detail_str += f"{asset['code']}: {p_pct}% {status_icon} (原:{initial_display})\n"
 
-            hit_any_ki = any(a['hit_ki'] for a in assets) # 只有 AKI 會觸發這個
+            hit_any_ki = any(a['hit_ki'] for a in assets)
             all_above_strike_now = all((a['perf'] >= strike_thresh if a['price'] > 0 else False) for a in assets)
             valid_assets = [a for a in assets if a['perf'] > 0]
             if valid_assets:
@@ -444,8 +448,6 @@ if uploaded_file is not None:
                     group_status_short = "🎉 提前出場 (KO)"
                     need_notify = True
             elif pd.notna(row['ValuationDate']) and today_ts >= row['ValuationDate']:
-                # 到期判斷 (EKI 在這裡算總帳)
-                # 重新檢查是否有跌破 (因為 hit_any_ki 只抓歷史 AKI)
                 final_hit_ki = False
                 for a in assets:
                      if a['perf'] < ki_thresh: final_hit_ki = True
@@ -469,18 +471,14 @@ if uploaded_file is not None:
                 
                 if ko_step_val > 0: status_msgs.append(f"📉 目前KO門檻: {current_ko_pct}%")
 
-                # 1. AKI (紅燈，通知)
                 if hit_any_ki:
                     status_msgs.insert(0, f"☠️ 已跌破KI ({','.join(hit_ki_list)})")
                     line_status_short = f"⚠️ 警告：已跌破 KI ({','.join(hit_ki_list)})"
                     group_status_short = f"⚠️ 跌破 KI ({','.join(hit_ki_list)})"
                     need_notify = True 
                 
-                # 2. EKI (橘燈，不通知)
                 elif any_eki_risk_today:
                      status_msgs.insert(0, f"📉 市價低於KI (EKI觀察中)")
-                     # 🌟 這裡故意不設 need_notify = True，也不設 line_status_short
-                     # 這樣就不會發 LINE，但列表看得到
 
                 if is_dra:
                     if any_below_strike_today:
@@ -503,6 +501,8 @@ if uploaded_file is not None:
             line_ids = [x.strip() for x in re.split(r'[;,，]', str(row.get('Line_ID', ''))) if x.strip()]
             
             mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
+            
+            # 🌟 [修復點] 現在這裡不會報錯了，因為 asset_detail_str 已經有值了
             common_msg_body = (
                 f"Hi {row['Name']} 您好，\n"
                 f"您的結構型商品 {row['ID']} ({row['Product_Type']}) 最新狀態：\n\n"
@@ -572,32 +572,36 @@ if uploaded_file is not None:
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    if st.button(btn_label, type="primary"):
-                        if admin_summary_list and MY_LINE_USER_ID:
-                            summary_text = f"【ELN 戰情快報 (Admin)】\n📅 {real_today.strftime('%Y/%m/%d')}\n----------------\n" + "\n".join(admin_summary_list)
-                            send_line_push(MY_LINE_USER_ID, summary_text)
-                            st.toast("✅ 管理員摘要已發送", icon="📢")
+                    # 只有設定了 secrets 才會出現發送按鈕
+                    if LINE_ACCESS_TOKEN and MY_LINE_USER_ID:
+                        if st.button(btn_label, type="primary"):
+                            if admin_summary_list and MY_LINE_USER_ID:
+                                summary_text = f"【ELN 戰情快報 (Admin)】\n📅 {real_today.strftime('%Y/%m/%d')}\n----------------\n" + "\n".join(admin_summary_list)
+                                send_line_push(MY_LINE_USER_ID, summary_text)
+                                st.toast("✅ 管理員摘要已發送", icon="📢")
 
-                        success_cnt = 0
-                        bar = st.progress(0, text="正在發送客戶通知...")
-                        for idx, item in enumerate(individual_messages):
-                            if send_line_push(item['target'], item['msg']):
-                                success_cnt += 1
-                            bar.progress((idx+1)/count)
-                        bar.empty()
-                        st.session_state['is_sent'] = True
-                        st.success(f"🎉 成功發送 {success_cnt} 則通知！")
-                        st.balloons()
+                            success_cnt = 0
+                            bar = st.progress(0, text="正在發送客戶通知...")
+                            for idx, item in enumerate(individual_messages):
+                                if send_line_push(item['target'], item['msg']):
+                                    success_cnt += 1
+                                bar.progress((idx+1)/count)
+                            bar.empty()
+                            st.session_state['is_sent'] = True
+                            st.success(f"🎉 成功發送 {success_cnt} 則通知！")
+                            st.balloons()
+                    else:
+                        st.info("⚠️ 若要使用一鍵發送，請設定 Secrets")
                 
                 with col2:
                     if st.button("📢 發送群組大廣播"):
-                        if LINE_GROUP_ID:
+                        if LINE_GROUP_ID and LINE_ACCESS_TOKEN:
                             if send_line_push(LINE_GROUP_ID, report_text):
                                 st.success("✅ 群組日報已發送！")
                             else:
                                 st.error("❌ 發送失敗，請檢查 Group ID")
                         else:
-                            st.error("❌ 未設定 LINE_GROUP_ID，請手動複製上方文案。")
+                            st.error("❌ 未設定 LINE_GROUP_ID 或 Token，請手動複製上方文案。")
 
     except Exception as e:
         st.error(f"發生錯誤：{e}")
